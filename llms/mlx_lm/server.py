@@ -351,6 +351,26 @@ class APIHandler(BaseHTTPRequestHandler):
             }
 
         choice = response["choices"][0]
+        if self.logprobs > 0:
+            detokenizer = self.tokenizer.detokenizer
+            detokenizer.reset()
+            
+            choice["logprobs"]["tokens"] = []
+            choice["logprobs"]["text_offset"] = [0]
+            accumulated_text = ""
+
+            for token in tokens:
+                detokenizer.add_token(token)
+                token_text = detokenizer.last_segment
+                choice["logprobs"]["tokens"].append(token_text)
+                accumulated_text += token_text
+                choice["logprobs"]["text_offset"].append(len(accumulated_text))
+
+            choice["logprobs"]["token_logprobs"] = token_logprobs
+            choice["logprobs"]["top_logprobs"] = [
+                {self.tokenizer.decode([int(token)]): prob for token, prob in top_logprob.items()}
+                for top_logprob in top_tokens
+            ]
 
         # Add dynamic response
         if self.object_type.startswith("chat.completion"):
