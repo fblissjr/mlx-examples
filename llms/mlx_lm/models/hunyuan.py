@@ -137,11 +137,11 @@ class Attention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, dim, hidden_dim):
+    def __init__(self, dim, hidden_dim, bias=False):  # Added bias parameter
         super().__init__()
-        self.gate_proj = nn.Linear(dim, hidden_dim, bias=False)
-        self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
-        self.up_proj = nn.Linear(dim, hidden_dim, bias=False)
+        self.gate_proj = nn.Linear(dim, hidden_dim, bias=bias)
+        self.down_proj = nn.Linear(hidden_dim, dim, bias=bias)
+        self.up_proj = nn.Linear(dim, hidden_dim, bias=bias)
 
     def __call__(self, x) -> mx.array:
         return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
@@ -164,7 +164,8 @@ class MoeBlock(nn.Module):
         self.use_shared_mlp = args.use_mixed_mlp_moe
 
         if args.use_mixed_mlp_moe:
-            self.shared_mlp = MLP(dim, intermediate_size * args.num_shared_expert)
+            # Modified to explicitly set bias=False since we don't use them
+            self.shared_mlp = MLP(dim, intermediate_size * args.num_shared_expert, bias=False)
 
         self.num_experts = num_experts = args.num_experts
         self.top_k = args.moe_topk
@@ -275,11 +276,19 @@ class Model(nn.Module):
         return self.model.embed_tokens.as_linear(out)
 
     def sanitize(self, weights):
+        """
+        Sanitize the weights when loading from safetensors.
+        Handles both expert and shared MLP biases.
+        """
         if "model.layers.0.mlp.experts.0.up_proj.weight" not in weights:
             return weights
+
         for l in range(self.args.num_hidden_layers):
             prefix = f"model.layers.{l}"
+            
+            # Handle expert layer params
             for n in ["up_proj", "down_proj", "gate_proj"]:
+                # Handle weights
                 for k in ["weight", "scales", "biases"]:
                     if f"{prefix}.mlp.experts.0.{n}.{k}" in weights:
                         to_join = [
@@ -287,6 +296,26 @@ class Model(nn.Module):
                             for e in range(self.args.num_experts)
                         ]
                         weights[f"{prefix}.mlp.switch_mlp.{n}.{k}"] = mx.stack(to_join)
+                
+                # Handle and remove expert biases
+                bias_key = f"{prefix}.mlp.experts.0.{n}.bias"
+                if bias_key in weights:
+                    for e in range(self.args.num_experts):
+                        bias_key = f"{prefix}.mlp.experts.{e}.{n}.bias"
+                        if bias_key in weights:
+                            weights.pop(bias_key)
+                
+                # Handle and remove shared MLP biases 
+                shared_bias_key = f"{prefix}.mlp.shared_mlp.{n}.bias"
+                if shared_bias_key in weights:
+                    weights.pop(shared_bias_key)
+
+            # Handle and remove attention biases
+            for n in ["q_proj", "k_proj", "v_proj", "o_proj"]:
+                bias_key = f"{prefix}.self_attn.{n}.bias"
+                if bias_key in weights:
+                    weights.pop(bias_key)
+
         return weights
 
     @property
